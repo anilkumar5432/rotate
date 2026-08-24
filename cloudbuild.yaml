@@ -9,9 +9,10 @@ steps:
 
         chmod +x rotate-if-needed.sh
 
-        ./rotate-if-needed.sh \
-          "${_SA_EMAIL}" \
-          "${PROJECT_ID}"
+        ./rotate-if-needed.sh "${_SA_EMAIL}"
 
 options:
   logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _SA_EMAIL: ""
