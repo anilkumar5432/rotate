@@ -9,10 +9,12 @@ steps:
 
         chmod +x rotate-if-needed.sh
 
-        ./rotate-if-needed.sh "${_SA_EMAIL}"
+        echo "SA Email: ${_SA_EMAIL}"
 
-options:
-  logging: CLOUD_LOGGING_ONLY
+        ./rotate-if-needed.sh "${_SA_EMAIL}"
 
 substitutions:
   _SA_EMAIL: ""
+
+options:
+  logging: CLOUD_LOGGING_ONLY
