@@ -1,0 +1,17 @@
+steps:
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        apt-get update
+        apt-get install -y jq
+
+        chmod +x rotate-if-needed.sh
+
+        ./rotate-if-needed.sh \
+          "${_SA_EMAIL}" \
+          "${PROJECT_ID}"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
