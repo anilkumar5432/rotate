@@ -2,13 +2,44 @@
 
 set -euo pipefail
 
-SA_EMAIL="$1"
-PROJECT_ID="$2"
+log() {
+  echo "[INFO] $(date -u +"%Y-%m-%dT%H:%M:%SZ") - $*"
+}
 
-ROTATE_THRESHOLD_DAYS=10
+warn() {
+  echo "[WARN] $(date -u +"%Y-%m-%dT%H:%M:%SZ") - $*"
+}
+
+error() {
+  echo "[ERROR] $(date -u +"%Y-%m-%dT%H:%M:%SZ") - $*"
+  exit 1
+}
+
+#----------------------------------------------------------------------------
+# Input
+#----------------------------------------------------------------------------
+SA_EMAIL="$1"
+
+[[ -z "$SA_EMAIL" ]] && error "Service account email is required"
+
+PROJECT_ID=$(echo "$SA_EMAIL" | cut -d'@' -f2 | cut -d'.' -f1)
+
+[[ -z "$PROJECT_ID" ]] && error "Unable to derive project id from $SA_EMAIL"
+
 SECRET_NAME=$(echo "$SA_EMAIL" | cut -d'@' -f1)
 
-echo "Checking Service Account: $SA_EMAIL"
+ROTATE_THRESHOLD_DAYS=10
+
+log "Starting Service Account Key Rotation"
+log "Service Account : $SA_EMAIL"
+log "Project ID      : $PROJECT_ID"
+log "Secret Name     : $SECRET_NAME"
+log "Threshold Days  : $ROTATE_THRESHOLD_DAYS"
+
+#----------------------------------------------------------------------------
+# Get Keys
+#----------------------------------------------------------------------------
+log "Retrieving user-managed keys..."
 
 KEY_INFO=$(gcloud iam service-accounts keys list \
   --iam-account="$SA_EMAIL" \
@@ -18,52 +49,96 @@ KEY_INFO=$(gcloud iam service-accounts keys list \
 
 KEY_COUNT=$(echo "$KEY_INFO" | jq length)
 
-if [[ "$KEY_COUNT" -eq 0 ]]; then
-  echo "No user-managed keys found."
-  exit 1
-fi
+log "Found $KEY_COUNT user-managed key(s)"
 
-NEWEST_EXPIRY=$(echo "$KEY_INFO" | jq -r 'sort_by(.validBeforeTime) | last | .validBeforeTime')
+[[ "$KEY_COUNT" -eq 0 ]] && error "No user-managed keys found"
 
-echo "Newest key expires at: $NEWEST_EXPIRY"
+#----------------------------------------------------------------------------
+# Find Newest Key
+#----------------------------------------------------------------------------
+NEWEST_KEY_ID=$(echo "$KEY_INFO" | jq -r '
+  sort_by(.validBeforeTime) | last | .name
+')
 
+NEWEST_EXPIRY=$(echo "$KEY_INFO" | jq -r '
+  sort_by(.validBeforeTime) | last | .validBeforeTime
+')
+
+log "Newest Key Id : $(basename "$NEWEST_KEY_ID")"
+log "Expiry Date   : $NEWEST_EXPIRY"
+
+#----------------------------------------------------------------------------
+# Calculate Remaining Days
+#----------------------------------------------------------------------------
 EXPIRY_EPOCH=$(date -d "$NEWEST_EXPIRY" +%s)
 CURRENT_EPOCH=$(date -u +%s)
 
 DAYS_LEFT=$(( (EXPIRY_EPOCH - CURRENT_EPOCH) / 86400 ))
 
-echo "Days remaining: $DAYS_LEFT"
+log "Remaining Days : $DAYS_LEFT"
 
+#----------------------------------------------------------------------------
+# Skip if healthy
+#----------------------------------------------------------------------------
 if [[ "$DAYS_LEFT" -gt "$ROTATE_THRESHOLD_DAYS" ]]; then
-  echo "Rotation not required."
+  log "Key is healthy. Rotation not required."
   exit 0
 fi
 
-echo "Key is expiring within $ROTATE_THRESHOLD_DAYS days."
-echo "Generating replacement key..."
+warn "Key expires within ${ROTATE_THRESHOLD_DAYS} days"
+warn "Generating replacement key"
 
-TEMP_KEY="/tmp/$(basename "$SECRET_NAME").json"
+#----------------------------------------------------------------------------
+# Create New Key
+#----------------------------------------------------------------------------
+TEMP_KEY="/tmp/${SECRET_NAME}.json"
 
-gcloud iam service-accounts keys create "$TEMP_KEY" \
+gcloud iam service-accounts keys create \
+  "$TEMP_KEY" \
   --iam-account="$SA_EMAIL" \
   --project="$PROJECT_ID"
 
-if ! gcloud secrets describe "$SECRET_NAME" \
+NEW_KEY_ID=$(jq -r '.private_key_id' "$TEMP_KEY")
+
+log "Created New Key : $NEW_KEY_ID"
+
+#----------------------------------------------------------------------------
+# Ensure Secret Exists
+#----------------------------------------------------------------------------
+if gcloud secrets describe "$SECRET_NAME" \
   --project="$PROJECT_ID" >/dev/null 2>&1; then
 
-  echo "Creating secret: $SECRET_NAME"
+  log "Secret already exists"
+
+else
+
+  warn "Secret not found. Creating: $SECRET_NAME"
 
   gcloud secrets create "$SECRET_NAME" \
-    --replication-policy=automatic \
-    --project="$PROJECT_ID"
+    --project="$PROJECT_ID" \
+    --replication-policy=automatic
+
+  log "Secret created"
 fi
 
-gcloud secrets versions add "$SECRET_NAME" \
+#----------------------------------------------------------------------------
+# Upload Secret Version
+#----------------------------------------------------------------------------
+log "Uploading key into Secret Manager"
+
+VERSION_NAME=$(gcloud secrets versions add \
+  "$SECRET_NAME" \
   --data-file="$TEMP_KEY" \
-  --project="$PROJECT_ID"
+  --project="$PROJECT_ID" \
+  --format="value(name)")
 
-echo "Successfully uploaded new key to Secret Manager."
+log "Created secret version : $VERSION_NAME"
 
+#----------------------------------------------------------------------------
+# Cleanup
+#----------------------------------------------------------------------------
 rm -f "$TEMP_KEY"
 
-echo "Rotation completed."
+log "Temporary key file removed"
+log "Rotation completed successfully"
+``
