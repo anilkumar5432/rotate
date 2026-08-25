@@ -3,16 +3,6 @@
 set -euo pipefail
 
 # ============================================================================
-# Configuration
-# ============================================================================
-#ORG_ID="924103328234"
-#ROTATE_THRESHOLD_DAYS=10
-
-# ============================================================================
-# Configuration
-# ============================================================================
-
-# ============================================================================
 # Logging
 # ============================================================================
 log() {
@@ -166,39 +156,6 @@ delete_expired_keys() {
   fi
 
 done < <(echo "$KEYS" | jq -c '.[]')
-  # [[ "$(echo "$KEYS" | jq length)" -eq 0 ]] && return
-
-  # echo "$KEYS" | jq -c '.[]' | while read -r KEY; do
-
-  #   KEY_ID=$(echo "$KEY" | jq -r '.name | split("/") | last')
-  #   EXPIRY=$(echo "$KEY" | jq -r '.validBeforeTime')
-
-  #   [[ "$EXPIRY" == "null" || -z "$EXPIRY" ]] && continue
-
-  #   EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
-
-  #   if [[ "$EXPIRY_EPOCH" -le "$CURRENT_EPOCH" ]]; then
-
-  #     warn "Expired key found"
-  #     warn "Project         : $PROJECT_ID"
-  #     warn "Service Account : $SA_EMAIL"
-  #     warn "Key ID          : $KEY_ID"
-  #     warn "Expired On      : $EXPIRY"
-
-  #     gcloud iam service-accounts keys delete \
-  #       "$KEY_ID" \
-  #       --iam-account="$SA_EMAIL" \
-  #       --project="$PROJECT_ID" \
-  #       --quiet
-
-  #     log "Deleted expired key : $KEY_ID"
-
-  #     LAST_DELETED_COUNT=$((LAST_DELETED_COUNT + 1))
-  #     LAST_SA_MODIFIED="true"
-
-  #   fi
-
-  # done
 
   export LAST_DELETED_COUNT
   export LAST_SA_MODIFIED
