@@ -1,5 +1,6 @@
 steps:
-  - name: SA Key Automation ForgedFiber37
+  - id: SA Key Automation ForgedFiber37
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: bash
     args:
       - -c
