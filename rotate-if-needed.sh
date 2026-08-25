@@ -135,40 +135,70 @@ delete_expired_keys() {
     --project="$PROJECT_ID" \
     --filter="keyType=USER_MANAGED" \
     --format=json 2>/dev/null || echo "[]")
+  while read -r KEY; do
 
-  [[ "$(echo "$KEYS" | jq length)" -eq 0 ]] && return
+  KEY_ID=$(echo "$KEY" | jq -r '.name | split("/") | last')
+  EXPIRY=$(echo "$KEY" | jq -r '.validBeforeTime')
 
-  echo "$KEYS" | jq -c '.[]' | while read -r KEY; do
+  [[ "$EXPIRY" == "null" || -z "$EXPIRY" ]] && continue
 
-    KEY_ID=$(echo "$KEY" | jq -r '.name | split("/") | last')
-    EXPIRY=$(echo "$KEY" | jq -r '.validBeforeTime')
+  EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
 
-    [[ "$EXPIRY" == "null" || -z "$EXPIRY" ]] && continue
+  if [[ "$EXPIRY_EPOCH" -le "$CURRENT_EPOCH" ]]; then
 
-    EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
+    warn "Expired key found"
+    warn "Project         : $PROJECT_ID"
+    warn "Service Account : $SA_EMAIL"
+    warn "Key ID          : $KEY_ID"
+    warn "Expired On      : $EXPIRY"
 
-    if [[ "$EXPIRY_EPOCH" -le "$CURRENT_EPOCH" ]]; then
+    gcloud iam service-accounts keys delete \
+      "$KEY_ID" \
+      --iam-account="$SA_EMAIL" \
+      --project="$PROJECT_ID" \
+      --quiet
 
-      warn "Expired key found"
-      warn "Project         : $PROJECT_ID"
-      warn "Service Account : $SA_EMAIL"
-      warn "Key ID          : $KEY_ID"
-      warn "Expired On      : $EXPIRY"
+    log "Deleted expired key : $KEY_ID"
 
-      gcloud iam service-accounts keys delete \
-        "$KEY_ID" \
-        --iam-account="$SA_EMAIL" \
-        --project="$PROJECT_ID" \
-        --quiet
+    LAST_DELETED_COUNT=$((LAST_DELETED_COUNT + 1))
+    LAST_SA_MODIFIED="true"
 
-      log "Deleted expired key : $KEY_ID"
+  fi
 
-      LAST_DELETED_COUNT=$((LAST_DELETED_COUNT + 1))
-      LAST_SA_MODIFIED="true"
+done < <(echo "$KEYS" | jq -c '.[]')
+  # [[ "$(echo "$KEYS" | jq length)" -eq 0 ]] && return
 
-    fi
+  # echo "$KEYS" | jq -c '.[]' | while read -r KEY; do
 
-  done
+  #   KEY_ID=$(echo "$KEY" | jq -r '.name | split("/") | last')
+  #   EXPIRY=$(echo "$KEY" | jq -r '.validBeforeTime')
+
+  #   [[ "$EXPIRY" == "null" || -z "$EXPIRY" ]] && continue
+
+  #   EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
+
+  #   if [[ "$EXPIRY_EPOCH" -le "$CURRENT_EPOCH" ]]; then
+
+  #     warn "Expired key found"
+  #     warn "Project         : $PROJECT_ID"
+  #     warn "Service Account : $SA_EMAIL"
+  #     warn "Key ID          : $KEY_ID"
+  #     warn "Expired On      : $EXPIRY"
+
+  #     gcloud iam service-accounts keys delete \
+  #       "$KEY_ID" \
+  #       --iam-account="$SA_EMAIL" \
+  #       --project="$PROJECT_ID" \
+  #       --quiet
+
+  #     log "Deleted expired key : $KEY_ID"
+
+  #     LAST_DELETED_COUNT=$((LAST_DELETED_COUNT + 1))
+  #     LAST_SA_MODIFIED="true"
+
+  #   fi
+
+  # done
 
   export LAST_DELETED_COUNT
   export LAST_SA_MODIFIED
