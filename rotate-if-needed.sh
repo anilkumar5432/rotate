@@ -2,6 +2,15 @@
 
 set -euo pipefail
 
+# ============================================================================
+# Configuration
+# ============================================================================
+ORG_ID="123456789012"
+ROTATE_THRESHOLD_DAYS=10
+
+# ============================================================================
+# Logging Functions
+# ============================================================================
 log() {
   echo "[INFO] $(date -u +"%Y-%m-%dT%H:%M:%SZ") - $*"
 }
@@ -15,83 +24,134 @@ error() {
   exit 1
 }
 
-#----------------------------------------------------------------------------
-# Input
-#----------------------------------------------------------------------------
-SA_EMAIL="${1:-}"
+# ============================================================================
+# Function: Delete Expired Keys
+# ============================================================================
+delete_expired_keys() {
 
-#----------------------------------------------------------------------------
-# Mode 1: No Service Account Provided
-# Scan all service accounts and delete expired user-managed keys
-#----------------------------------------------------------------------------
-if [[ -z "$SA_EMAIL" ]]; then
-
-  PROJECT_ID=$(gcloud config get-value project 2>/dev/null)
-
-  [[ -z "$PROJECT_ID" ]] && error "No active project configured"
-
-  log "No service account supplied"
-  log "Project ID : $PROJECT_ID"
-  log "Scanning all service accounts for expired keys"
+  local PROJECT_ID="$1"
+  local SA_EMAIL="$2"
 
   CURRENT_EPOCH=$(date -u +%s)
 
-  SA_LIST=$(gcloud iam service-accounts list \
+  KEYS=$(gcloud iam service-accounts keys list \
+    --iam-account="$SA_EMAIL" \
     --project="$PROJECT_ID" \
-    --format="value(email)")
+    --filter="keyType=USER_MANAGED" \
+    --format=json 2>/dev/null || echo "[]")
 
-  for SA in $SA_LIST; do
+  KEY_COUNT=$(echo "$KEYS" | jq length)
 
-    log "Checking Service Account: $SA"
+  [[ "$KEY_COUNT" -eq 0 ]] && return 0
 
-    KEYS=$(gcloud iam service-accounts keys list \
-      --iam-account="$SA" \
+  echo "$KEYS" | jq -c '.[]' | while read -r KEY; do
+
+    KEY_ID=$(echo "$KEY" | jq -r '.name | split("/") | last')
+    EXPIRY=$(echo "$KEY" | jq -r '.validBeforeTime')
+
+    [[ "$EXPIRY" == "null" || -z "$EXPIRY" ]] && continue
+
+    EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
+
+    if [[ "$EXPIRY_EPOCH" -le "$CURRENT_EPOCH" ]]; then
+
+      warn "Expired key found"
+      warn "Project         : $PROJECT_ID"
+      warn "Service Account : $SA_EMAIL"
+      warn "Key ID          : $KEY_ID"
+      warn "Expired On      : $EXPIRY"
+
+      gcloud iam service-accounts keys delete \
+        "$KEY_ID" \
+        --iam-account="$SA_EMAIL" \
+        --project="$PROJECT_ID" \
+        --quiet
+
+      log "Deleted expired key: $KEY_ID"
+
+    fi
+
+  done
+}
+
+# ============================================================================
+# Input
+# ============================================================================
+SA_EMAIL="${1:-}"
+
+# ============================================================================
+# MODE 1
+# No Service Account Supplied
+# Scan Entire Organization and Delete Expired Keys
+# ============================================================================
+if [[ -z "$SA_EMAIL" ]]; then
+
+  log "No service account specified"
+  log "Organization ID : $ORG_ID"
+  log "Scanning all organization projects for expired keys"
+
+  PROJECTS=$(gcloud projects list \
+    --filter="parent.type=organization AND parent.id=${ORG_ID}" \
+    --format="value(projectId)")
+
+  PROJECT_COUNT=0
+  KEY_DELETE_COUNT=0
+
+  for PROJECT_ID in $PROJECTS; do
+
+    PROJECT_COUNT=$((PROJECT_COUNT + 1))
+
+    log "================================================="
+    log "Project : $PROJECT_ID"
+    log "================================================="
+
+    SA_LIST=$(gcloud iam service-accounts list \
       --project="$PROJECT_ID" \
-      --filter="keyType=USER_MANAGED" \
-      --format="json")
+      --format="value(email)" \
+      2>/dev/null || true)
 
-    KEY_COUNT=$(echo "$KEYS" | jq length)
+    [[ -z "$SA_LIST" ]] && continue
 
-    [[ "$KEY_COUNT" -eq 0 ]] && continue
+    for SA in $SA_LIST; do
 
-    echo "$KEYS" | jq -c '.[]' | while read -r KEY; do
+      log "Checking : $SA"
 
-      KEY_ID=$(echo "$KEY" | jq -r '.name | split("/") | last')
-      EXPIRY=$(echo "$KEY" | jq -r '.validBeforeTime')
+      BEFORE=$(gcloud iam service-accounts keys list \
+        --iam-account="$SA" \
+        --project="$PROJECT_ID" \
+        --filter="keyType=USER_MANAGED" \
+        --format="value(name)" 2>/dev/null | wc -l)
 
-      [[ "$EXPIRY" == "null" || -z "$EXPIRY" ]] && continue
+      delete_expired_keys "$PROJECT_ID" "$SA"
 
-      EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
+      AFTER=$(gcloud iam service-accounts keys list \
+        --iam-account="$SA" \
+        --project="$PROJECT_ID" \
+        --filter="keyType=USER_MANAGED" \
+        --format="value(name)" 2>/dev/null | wc -l)
 
-      if [[ "$EXPIRY_EPOCH" -le "$CURRENT_EPOCH" ]]; then
-
-        warn "Expired key found"
-        warn "Service Account : $SA"
-        warn "Key ID          : $KEY_ID"
-        warn "Expired On      : $EXPIRY"
-
-        gcloud iam service-accounts keys delete "$KEY_ID" \
-          --iam-account="$SA" \
-          --project="$PROJECT_ID" \
-          --quiet
-
-        log "Deleted expired key: $KEY_ID"
-
+      if [[ "$BEFORE" -gt "$AFTER" ]]; then
+        KEY_DELETE_COUNT=$((KEY_DELETE_COUNT + (BEFORE - AFTER)))
       fi
 
     done
 
   done
 
-  log "Expired key cleanup completed successfully"
+  log "================================================="
+  log "Organization scan completed"
+  log "Projects Scanned : $PROJECT_COUNT"
+  log "Keys Deleted     : $KEY_DELETE_COUNT"
+  log "================================================="
+
   exit 0
 
 fi
 
-#----------------------------------------------------------------------------
-# Mode 2: Service Account Provided
-# Rotate key if expiry is within threshold
-#----------------------------------------------------------------------------
+# ============================================================================
+# MODE 2
+# Rotate Particular Service Account
+# ============================================================================
 
 [[ -z "$SA_EMAIL" ]] && error "Service account email is required"
 
@@ -101,81 +161,35 @@ PROJECT_ID=$(echo "$SA_EMAIL" | cut -d'@' -f2 | cut -d'.' -f1)
 
 SECRET_NAME=$(echo "$SA_EMAIL" | cut -d'@' -f1)
 
-ROTATE_THRESHOLD_DAYS=10
-
 log "Starting Service Account Key Rotation"
 log "Service Account : $SA_EMAIL"
 log "Project ID      : $PROJECT_ID"
 log "Secret Name     : $SECRET_NAME"
 log "Threshold Days  : $ROTATE_THRESHOLD_DAYS"
 
-#----------------------------------------------------------------------------
-# Get Keys
-#----------------------------------------------------------------------------
-log "Retrieving user-managed keys..."
+# ============================================================================
+# Cleanup Expired Keys for Target Service Account
+# ============================================================================
+delete_expired_keys "$PROJECT_ID" "$SA_EMAIL"
 
+# ============================================================================
+# Retrieve Active Keys
+# ============================================================================
 KEY_INFO=$(gcloud iam service-accounts keys list \
   --iam-account="$SA_EMAIL" \
   --project="$PROJECT_ID" \
   --filter="keyType=USER_MANAGED" \
-  --format="json")
+  --format=json)
 
 KEY_COUNT=$(echo "$KEY_INFO" | jq length)
 
-log "Found $KEY_COUNT user-managed key(s)"
+log "Active user-managed keys : $KEY_COUNT"
 
-[[ "$KEY_COUNT" -eq 0 ]] && error "No user-managed keys found"
+[[ "$KEY_COUNT" -eq 0 ]] && error "No active user-managed keys found"
 
-#----------------------------------------------------------------------------
-# Delete Expired Keys for Requested Service Account
-#----------------------------------------------------------------------------
-log "Checking for expired keys..."
-
-CURRENT_EPOCH=$(date -u +%s)
-
-echo "$KEY_INFO" | jq -c '.[]' | while read -r KEY; do
-
-  KEY_NAME=$(echo "$KEY" | jq -r '.name')
-  KEY_ID=$(basename "$KEY_NAME")
-  EXPIRY=$(echo "$KEY" | jq -r '.validBeforeTime')
-
-  [[ "$EXPIRY" == "null" || -z "$EXPIRY" ]] && continue
-
-  EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
-
-  if [[ "$EXPIRY_EPOCH" -le "$CURRENT_EPOCH" ]]; then
-
-    warn "Deleting expired key: $KEY_ID"
-
-    gcloud iam service-accounts keys delete "$KEY_ID" \
-      --iam-account="$SA_EMAIL" \
-      --project="$PROJECT_ID" \
-      --quiet
-
-    log "Deleted expired key: $KEY_ID"
-
-  fi
-
-done
-
-#----------------------------------------------------------------------------
-# Refresh Key List
-#----------------------------------------------------------------------------
-KEY_INFO=$(gcloud iam service-accounts keys list \
-  --iam-account="$SA_EMAIL" \
-  --project="$PROJECT_ID" \
-  --filter="keyType=USER_MANAGED" \
-  --format="json")
-
-KEY_COUNT=$(echo "$KEY_INFO" | jq length)
-
-log "Active user-managed keys after cleanup : $KEY_COUNT"
-
-[[ "$KEY_COUNT" -eq 0 ]] && error "No active user-managed keys remain"
-
-#----------------------------------------------------------------------------
+# ============================================================================
 # Find Newest Key
-#----------------------------------------------------------------------------
+# ============================================================================
 NEWEST_KEY_ID=$(echo "$KEY_INFO" | jq -r '
   sort_by(.validBeforeTime) | last | .name
 ')
@@ -184,12 +198,12 @@ NEWEST_EXPIRY=$(echo "$KEY_INFO" | jq -r '
   sort_by(.validBeforeTime) | last | .validBeforeTime
 ')
 
-log "Newest Key Id : $(basename "$NEWEST_KEY_ID")"
+log "Newest Key ID : $(basename "$NEWEST_KEY_ID")"
 log "Expiry Date   : $NEWEST_EXPIRY"
 
-#----------------------------------------------------------------------------
-# Calculate Remaining Days
-#----------------------------------------------------------------------------
+# ============================================================================
+# Calculate Days Remaining
+# ============================================================================
 EXPIRY_EPOCH=$(date -d "$NEWEST_EXPIRY" +%s)
 CURRENT_EPOCH=$(date -u +%s)
 
@@ -197,9 +211,9 @@ DAYS_LEFT=$(( (EXPIRY_EPOCH - CURRENT_EPOCH) / 86400 ))
 
 log "Remaining Days : $DAYS_LEFT"
 
-#----------------------------------------------------------------------------
-# Skip if healthy
-#----------------------------------------------------------------------------
+# ============================================================================
+# Skip Rotation if Healthy
+# ============================================================================
 if [[ "$DAYS_LEFT" -gt "$ROTATE_THRESHOLD_DAYS" ]]; then
   log "Key is healthy. Rotation not required."
   exit 0
@@ -208,9 +222,9 @@ fi
 warn "Key expires within ${ROTATE_THRESHOLD_DAYS} days"
 warn "Generating replacement key"
 
-#----------------------------------------------------------------------------
+# ============================================================================
 # Create New Key
-#----------------------------------------------------------------------------
+# ============================================================================
 TEMP_KEY="/tmp/${SECRET_NAME}.json"
 
 gcloud iam service-accounts keys create \
@@ -220,11 +234,11 @@ gcloud iam service-accounts keys create \
 
 NEW_KEY_ID=$(jq -r '.private_key_id' "$TEMP_KEY")
 
-log "Created New Key : $NEW_KEY_ID"
+log "Created new key : $NEW_KEY_ID"
 
-#----------------------------------------------------------------------------
+# ============================================================================
 # Ensure Secret Exists
-#----------------------------------------------------------------------------
+# ============================================================================
 if gcloud secrets describe "$SECRET_NAME" \
   --project="$PROJECT_ID" >/dev/null 2>&1; then
 
@@ -234,7 +248,8 @@ else
 
   warn "Secret not found. Creating: $SECRET_NAME"
 
-  gcloud secrets create "$SECRET_NAME" \
+  gcloud secrets create \
+    "$SECRET_NAME" \
     --project="$PROJECT_ID" \
     --replication-policy=automatic
 
@@ -242,10 +257,10 @@ else
 
 fi
 
-#----------------------------------------------------------------------------
+# ============================================================================
 # Upload Secret Version
-#----------------------------------------------------------------------------
-log "Uploading key into Secret Manager"
+# ============================================================================
+log "Uploading key to Secret Manager"
 
 VERSION_NAME=$(gcloud secrets versions add \
   "$SECRET_NAME" \
@@ -255,9 +270,9 @@ VERSION_NAME=$(gcloud secrets versions add \
 
 log "Created secret version : $VERSION_NAME"
 
-#----------------------------------------------------------------------------
+# ============================================================================
 # Cleanup
-#----------------------------------------------------------------------------
+# ============================================================================
 rm -f "$TEMP_KEY"
 
 log "Temporary key file removed"
