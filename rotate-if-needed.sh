@@ -51,7 +51,7 @@ ensure_secret() {
 }
 
 # ============================================================================
-# Upload Key To Secret Manager
+# Upload Secret
 # ============================================================================
 upload_secret() {
 
@@ -107,6 +107,9 @@ delete_expired_keys() {
   local PROJECT_ID="$1"
   local SA_EMAIL="$2"
 
+  LAST_DELETED_COUNT=0
+  LAST_SA_MODIFIED="false"
+
   CURRENT_EPOCH=$(date -u +%s)
 
   KEYS=$(gcloud iam service-accounts keys list \
@@ -115,7 +118,7 @@ delete_expired_keys() {
     --filter="keyType=USER_MANAGED" \
     --format=json 2>/dev/null || echo "[]")
 
-  [[ "$(echo "$KEYS" | jq length)" -eq 0 ]] && return 0
+  [[ "$(echo "$KEYS" | jq length)" -eq 0 ]] && return
 
   echo "$KEYS" | jq -c '.[]' | while read -r KEY; do
 
@@ -142,9 +145,15 @@ delete_expired_keys() {
 
       log "Deleted expired key : $KEY_ID"
 
+      LAST_DELETED_COUNT=$((LAST_DELETED_COUNT + 1))
+      LAST_SA_MODIFIED="true"
+
     fi
 
   done
+
+  export LAST_DELETED_COUNT
+  export LAST_SA_MODIFIED
 }
 
 # ============================================================================
@@ -153,9 +162,7 @@ delete_expired_keys() {
 SA_EMAIL="${1:-}"
 
 # ============================================================================
-# MODE 1
-# No Service Account Passed
-# Scan Entire Organization & Delete Expired Keys
+# MODE 1 - Organization Wide Cleanup
 # ============================================================================
 if [[ -z "$SA_EMAIL" ]]; then
 
@@ -163,15 +170,22 @@ if [[ -z "$SA_EMAIL" ]]; then
   log "Organization ID : $ORG_ID"
   log "Scanning all projects for expired keys"
 
+  PROJECT_COUNT=0
+  TOTAL_SA_COUNT=0
+  TOTAL_EXPIRED_KEYS_DELETED=0
+
+  ORG_AFFECTED_SAS=""
+
   PROJECTS=$(gcloud projects list \
     --filter="parent.type=organization AND parent.id=${ORG_ID}" \
     --format="value(projectId)")
 
-  PROJECT_COUNT=0
-
   for PROJECT_ID in $PROJECTS; do
 
     PROJECT_COUNT=$((PROJECT_COUNT + 1))
+    PROJECT_SA_COUNT=0
+    PROJECT_KEYS_DELETED=0
+    PROJECT_AFFECTED_SAS=""
 
     log "=================================================="
     log "Project : $PROJECT_ID"
@@ -185,14 +199,59 @@ if [[ -z "$SA_EMAIL" ]]; then
     [[ -z "$SA_LIST" ]] && continue
 
     for SA in $SA_LIST; do
+
+      PROJECT_SA_COUNT=$((PROJECT_SA_COUNT + 1))
+      TOTAL_SA_COUNT=$((TOTAL_SA_COUNT + 1))
+
       delete_expired_keys "$PROJECT_ID" "$SA"
+
+      PROJECT_KEYS_DELETED=$((PROJECT_KEYS_DELETED + LAST_DELETED_COUNT))
+      TOTAL_EXPIRED_KEYS_DELETED=$((TOTAL_EXPIRED_KEYS_DELETED + LAST_DELETED_COUNT))
+
+      if [[ "$LAST_SA_MODIFIED" == "true" ]]; then
+        PROJECT_AFFECTED_SAS="${PROJECT_AFFECTED_SAS}${SA}"$'\n'
+        ORG_AFFECTED_SAS="${ORG_AFFECTED_SAS}${PROJECT_ID} | ${SA}"$'\n'
+      fi
+
     done
+
+    log "--------------------------------------------------"
+    log "Project Summary : $PROJECT_ID"
+    log "Service Accounts Scanned : $PROJECT_SA_COUNT"
+    log "Expired Keys Deleted     : $PROJECT_KEYS_DELETED"
+
+    if [[ -n "$PROJECT_AFFECTED_SAS" ]]; then
+
+      log "Service Accounts With Deleted Keys:"
+
+      while IFS= read -r SA; do
+        [[ -n "$SA" ]] && log "  - $SA"
+      done <<< "$PROJECT_AFFECTED_SAS"
+
+    fi
+
+    log "--------------------------------------------------"
 
   done
 
   log "=================================================="
   log "Organization-wide expired key cleanup completed"
-  log "Projects scanned : $PROJECT_COUNT"
+  log "Projects Scanned         : $PROJECT_COUNT"
+  log "Service Accounts Scanned : $TOTAL_SA_COUNT"
+  log "Expired Keys Deleted     : $TOTAL_EXPIRED_KEYS_DELETED"
+
+  if [[ -n "$ORG_AFFECTED_SAS" ]]; then
+
+    log "=================================================="
+    log "Service Accounts Where Keys Were Deleted"
+    log "=================================================="
+
+    while IFS= read -r ENTRY; do
+      [[ -n "$ENTRY" ]] && log "$ENTRY"
+    done <<< "$ORG_AFFECTED_SAS"
+
+  fi
+
   log "=================================================="
 
   exit 0
@@ -200,13 +259,11 @@ if [[ -z "$SA_EMAIL" ]]; then
 fi
 
 # ============================================================================
-# MODE 2
-# Rotate Specific Service Account
+# MODE 2 - Rotate Specific Service Account
 # ============================================================================
-
 PROJECT_ID=$(echo "$SA_EMAIL" | cut -d'@' -f2 | cut -d'.' -f1)
 
-[[ -z "$PROJECT_ID" ]] && error "Unable to derive project id from $SA_EMAIL"
+[[ -z "$PROJECT_ID" ]] && error "Unable to derive project id"
 
 SECRET_NAME=$(echo "$SA_EMAIL" | cut -d'@' -f1)
 
@@ -216,14 +273,8 @@ log "Project ID      : $PROJECT_ID"
 log "Secret Name     : $SECRET_NAME"
 log "Threshold Days  : $ROTATE_THRESHOLD_DAYS"
 
-# ============================================================================
-# Delete Expired Keys First
-# ============================================================================
 delete_expired_keys "$PROJECT_ID" "$SA_EMAIL"
 
-# ============================================================================
-# Retrieve Active Keys
-# ============================================================================
 KEY_INFO=$(gcloud iam service-accounts keys list \
   --iam-account="$SA_EMAIL" \
   --project="$PROJECT_ID" \
@@ -234,9 +285,6 @@ KEY_COUNT=$(echo "$KEY_INFO" | jq length)
 
 log "Active user-managed keys : $KEY_COUNT"
 
-# ============================================================================
-# No Key Exists -> Create Initial Key
-# ============================================================================
 if [[ "$KEY_COUNT" -eq 0 ]]; then
 
   warn "No user-managed keys found"
@@ -250,23 +298,12 @@ if [[ "$KEY_COUNT" -eq 0 ]]; then
 
 fi
 
-# ============================================================================
-# Find Newest Active Key
-# ============================================================================
-NEWEST_KEY_ID=$(echo "$KEY_INFO" | jq -r '
-  sort_by(.validBeforeTime) | last | .name
-')
-
-NEWEST_EXPIRY=$(echo "$KEY_INFO" | jq -r '
-  sort_by(.validBeforeTime) | last | .validBeforeTime
-')
+NEWEST_KEY_ID=$(echo "$KEY_INFO" | jq -r 'sort_by(.validBeforeTime) | last | .name')
+NEWEST_EXPIRY=$(echo "$KEY_INFO" | jq -r 'sort_by(.validBeforeTime) | last | .validBeforeTime')
 
 log "Newest Key ID : $(basename "$NEWEST_KEY_ID")"
 log "Expiry Date   : $NEWEST_EXPIRY"
 
-# ============================================================================
-# Days Remaining
-# ============================================================================
 EXPIRY_EPOCH=$(date -d "$NEWEST_EXPIRY" +%s)
 CURRENT_EPOCH=$(date -u +%s)
 
@@ -274,17 +311,11 @@ DAYS_LEFT=$(( (EXPIRY_EPOCH - CURRENT_EPOCH) / 86400 ))
 
 log "Remaining Days : $DAYS_LEFT"
 
-# ============================================================================
-# Skip Rotation If Healthy
-# ============================================================================
 if [[ "$DAYS_LEFT" -gt "$ROTATE_THRESHOLD_DAYS" ]]; then
   log "Key is healthy. Rotation not required."
   exit 0
 fi
 
-# ============================================================================
-# Rotate Key
-# ============================================================================
 warn "Key expires within ${ROTATE_THRESHOLD_DAYS} days"
 warn "Generating replacement key"
 
