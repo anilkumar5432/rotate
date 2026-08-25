@@ -12,12 +12,6 @@ set -euo pipefail
 # Configuration
 # ============================================================================
 
-ORG_ID=$(gcloud organizations list \
-  --format="value(ID)" | head -1)
-
-[[ -z "$ORG_ID" ]] && error "Unable to determine Organization ID"
-ROTATE_THRESHOLD_DAYS=10
-
 # ============================================================================
 # Logging
 # ============================================================================
@@ -33,6 +27,20 @@ error() {
   echo "[ERROR] $(date -u +"%Y-%m-%dT%H:%M:%SZ") - $*"
   exit 1
 }
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+# Automatically determine Organization ID
+ORG_ID=$(gcloud organizations list \
+  --format="value(ID)" | head -1)
+
+[[ -z "$ORG_ID" ]] && error "Unable to determine Organization ID. Verify Cloud Build SA has organization access."
+
+ROTATE_THRESHOLD_DAYS=10
+
+log "Detected Organization ID : $ORG_ID"
 
 # ============================================================================
 # Ensure Secret Exists
