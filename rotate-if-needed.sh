@@ -18,7 +18,7 @@ error() {
 #----------------------------------------------------------------------------
 # Input
 #----------------------------------------------------------------------------
-SA_EMAIL="$1"
+SA_EMAIL="${1:-}"
 
 [[ -z "$SA_EMAIL" ]] && error "Service account email is required"
 
@@ -54,7 +54,55 @@ log "Found $KEY_COUNT user-managed key(s)"
 [[ "$KEY_COUNT" -eq 0 ]] && error "No user-managed keys found"
 
 #----------------------------------------------------------------------------
-# Find Newest Key
+# Delete Expired Keys
+#----------------------------------------------------------------------------
+log "Checking for expired keys..."
+
+CURRENT_EPOCH=$(date -u +%s)
+
+echo "$KEY_INFO" | jq -c '.[]' | while read -r KEY; do
+
+  KEY_NAME=$(echo "$KEY" | jq -r '.name')
+  KEY_ID=$(basename "$KEY_NAME")
+  EXPIRY=$(echo "$KEY" | jq -r '.validBeforeTime')
+
+  [[ "$EXPIRY" == "null" || -z "$EXPIRY" ]] && continue
+
+  EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
+
+  if [[ "$EXPIRY_EPOCH" -le "$CURRENT_EPOCH" ]]; then
+
+    warn "Expired key found"
+    warn "Key ID     : $KEY_ID"
+    warn "Expired On : $EXPIRY"
+
+    gcloud iam service-accounts keys delete "$KEY_ID" \
+      --iam-account="$SA_EMAIL" \
+      --project="$PROJECT_ID" \
+      --quiet
+
+    log "Deleted expired key: $KEY_ID"
+  fi
+
+done
+
+#----------------------------------------------------------------------------
+# Refresh Key List After Cleanup
+#----------------------------------------------------------------------------
+KEY_INFO=$(gcloud iam service-accounts keys list \
+  --iam-account="$SA_EMAIL" \
+  --project="$PROJECT_ID" \
+  --filter="keyType=USER_MANAGED" \
+  --format="json")
+
+KEY_COUNT=$(echo "$KEY_INFO" | jq length)
+
+log "Active user-managed keys after cleanup : $KEY_COUNT"
+
+[[ "$KEY_COUNT" -eq 0 ]] && error "No active user-managed keys remain after cleanup"
+
+#----------------------------------------------------------------------------
+# Find Newest Active Key
 #----------------------------------------------------------------------------
 NEWEST_KEY_ID=$(echo "$KEY_INFO" | jq -r '
   sort_by(.validBeforeTime) | last | .name
@@ -81,7 +129,7 @@ log "Remaining Days : $DAYS_LEFT"
 # Skip if healthy
 #----------------------------------------------------------------------------
 if [[ "$DAYS_LEFT" -gt "$ROTATE_THRESHOLD_DAYS" ]]; then
-  log "Key is healthy. Rotation not required."
+  log "Newest key is healthy. Rotation not required."
   exit 0
 fi
 
@@ -135,10 +183,9 @@ VERSION_NAME=$(gcloud secrets versions add \
 log "Created secret version : $VERSION_NAME"
 
 #----------------------------------------------------------------------------
-# Cleanup
+# Cleanup Temporary File
 #----------------------------------------------------------------------------
 rm -f "$TEMP_KEY"
 
 log "Temporary key file removed"
 log "Rotation completed successfully"
-``
