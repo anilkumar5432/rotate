@@ -15,16 +15,19 @@ steps:
 
         apt-get update
         apt-get install -y jq
-        jq --version
 
         chmod +x scripts/rotate-sa-key.sh
 
-        echo "Service Account: ${_SA_EMAIL}"
+        echo "Service Account       : ${_SA_EMAIL}"
+        echo "Delete Expired Keys   : ${_DELETE_EXPIRED_KEYS}"
 
-        ./scripts/rotate-sa-key.sh "${_SA_EMAIL}"
+        ./scripts/rotate-sa-key.sh \
+          "${_SA_EMAIL}" \
+          "${_DELETE_EXPIRED_KEYS}"
 
 substitutions:
   _SA_EMAIL: ""
+  _DELETE_EXPIRED_KEYS: "false"
 
 options:
   logging: CLOUD_LOGGING_ONLY
