@@ -5,6 +5,7 @@ set -euo pipefail
 # ============================================================================
 # Logging
 # ============================================================================
+
 log() {
   echo "[INFO] $(date -u +"%Y-%m-%dT%H:%M:%SZ") - $*"
 }
@@ -42,11 +43,12 @@ ensure_secret() {
 
     warn "Secret not found. Creating: $SECRET_NAME"
 
-    gcloud secrets create "$SECRET_NAME" \
+    gcloud secrets create \
+      "$SECRET_NAME" \
       --project="$PROJECT_ID" \
       --replication-policy=automatic
 
-    log "Secret created"
+    log "Secret created successfully"
   fi
 }
 
@@ -70,10 +72,10 @@ upload_secret() {
 }
 
 # ============================================================================
-# Create Initial Key
+# Create New Key
 # ============================================================================
 
-create_initial_key() {
+create_new_key() {
 
   local PROJECT_ID="$1"
   local SA_EMAIL="$2"
@@ -81,7 +83,7 @@ create_initial_key() {
 
   TEMP_KEY="/tmp/${SECRET_NAME}.json"
 
-  log "Creating initial key"
+  log "Creating new service account key"
 
   gcloud iam service-accounts keys create \
     "$TEMP_KEY" \
@@ -90,15 +92,18 @@ create_initial_key() {
 
   NEW_KEY_ID=$(jq -r '.private_key_id' "$TEMP_KEY")
 
-  log "Created key: $NEW_KEY_ID"
+  log "Created new key: $NEW_KEY_ID"
 
   ensure_secret "$PROJECT_ID" "$SECRET_NAME"
 
-  upload_secret "$PROJECT_ID" "$SECRET_NAME" "$TEMP_KEY"
+  upload_secret \
+    "$PROJECT_ID" \
+    "$SECRET_NAME" \
+    "$TEMP_KEY"
 
   rm -f "$TEMP_KEY"
 
-  log "Initial key creation completed"
+  log "Temporary key file removed"
 }
 
 # ============================================================================
@@ -109,6 +114,8 @@ delete_expired_keys() {
 
   local PROJECT_ID="$1"
   local SA_EMAIL="$2"
+
+  local DELETED_COUNT=0
 
   CURRENT_EPOCH=$(date -u +%s)
 
@@ -137,11 +144,15 @@ delete_expired_keys() {
         --project="$PROJECT_ID" \
         --quiet
 
+      DELETED_COUNT=$((DELETED_COUNT + 1))
+
       log "Deleted expired key: $KEY_ID"
 
     fi
 
   done < <(echo "$KEYS" | jq -c '.[]')
+
+  log "Expired keys deleted: $DELETED_COUNT"
 }
 
 # ============================================================================
@@ -153,7 +164,7 @@ SA_EMAIL="${1:-}"
 [[ -z "$SA_EMAIL" ]] && error "Service Account email is required"
 
 # ============================================================================
-# Derive Values
+# Derive Project Details
 # ============================================================================
 
 PROJECT_ID=$(echo "$SA_EMAIL" | cut -d'@' -f2 | cut -d'.' -f1)
@@ -162,22 +173,16 @@ PROJECT_ID=$(echo "$SA_EMAIL" | cut -d'@' -f2 | cut -d'.' -f1)
 
 SECRET_NAME=$(echo "$SA_EMAIL" | cut -d'@' -f1)
 
-log "=============================================="
-log "Starting Service Account Key Rotation"
+log "=================================================="
+log "Starting Service Account Key Automation"
 log "Service Account : $SA_EMAIL"
 log "Project ID      : $PROJECT_ID"
 log "Secret Name     : $SECRET_NAME"
 log "Threshold Days  : $ROTATE_THRESHOLD_DAYS"
-log "=============================================="
+log "=================================================="
 
 # ============================================================================
-# Delete Expired Keys First
-# ============================================================================
-
-delete_expired_keys "$PROJECT_ID" "$SA_EMAIL"
-
-# ============================================================================
-# Get Existing Keys
+# Get Existing User Managed Keys
 # ============================================================================
 
 KEY_INFO=$(gcloud iam service-accounts keys list \
@@ -188,29 +193,36 @@ KEY_INFO=$(gcloud iam service-accounts keys list \
 
 KEY_COUNT=$(echo "$KEY_INFO" | jq length)
 
-log "Active user-managed keys: $KEY_COUNT"
+log "User-managed keys found: $KEY_COUNT"
 
 # ============================================================================
-# No Keys Present
+# No Keys Exist
 # ============================================================================
 
 if [[ "$KEY_COUNT" -eq 0 ]]; then
 
   warn "No user-managed keys found"
 
-  create_initial_key \
+  create_new_key \
     "$PROJECT_ID" \
     "$SA_EMAIL" \
     "$SECRET_NAME"
+
+  delete_expired_keys \
+    "$PROJECT_ID" \
+    "$SA_EMAIL"
+
+  log "Initial key created successfully"
 
   exit 0
 fi
 
 # ============================================================================
-# Check Newest Key
+# Find Latest Key
 # ============================================================================
 
 NEWEST_KEY_ID=$(echo "$KEY_INFO" | jq -r 'sort_by(.validBeforeTime) | last | .name')
+
 NEWEST_EXPIRY=$(echo "$KEY_INFO" | jq -r 'sort_by(.validBeforeTime) | last | .validBeforeTime')
 
 log "Newest Key ID : $(basename "$NEWEST_KEY_ID")"
@@ -224,34 +236,38 @@ DAYS_LEFT=$(((EXPIRY_EPOCH - CURRENT_EPOCH) / 86400))
 log "Remaining Days : $DAYS_LEFT"
 
 # ============================================================================
-# Rotation Decision
+# Key Healthy
 # ============================================================================
 
 if [[ "$DAYS_LEFT" -gt "$ROTATE_THRESHOLD_DAYS" ]]; then
-  log "Key is healthy. Rotation not required."
+
+  log "Key is healthy. No rotation required."
+
+  delete_expired_keys \
+    "$PROJECT_ID" \
+    "$SA_EMAIL"
+
+  log "Validation completed successfully"
+
   exit 0
 fi
-
-warn "Key expires within ${ROTATE_THRESHOLD_DAYS} days"
-warn "Creating replacement key"
 
 # ============================================================================
 # Rotate Key
 # ============================================================================
 
-TEMP_KEY="/tmp/${SECRET_NAME}.json"
+warn "Key expires within ${ROTATE_THRESHOLD_DAYS} days"
+warn "Creating replacement key"
 
-gcloud iam service-accounts keys create \
-  "$TEMP_KEY" \
-  --iam-account="$SA_EMAIL" \
-  --project="$PROJECT_ID"
+create_new_key \
+  "$PROJECT_ID" \
+  "$SA_EMAIL" \
+  "$SECRET_NAME"
 
-NEW_KEY_ID=$(jq -r '.private_key_id' "$TEMP_KEY")
+delete_expired_keys \
+  "$PROJECT_ID" \
+  "$SA_EMAIL"
 
-log "Created new key: $NEW_KEY_ID"
+log "Service account key rotation completed successfully"
 
-ensure_secret "$PROJECT_ID" "$SECRET_NAME"
-
-upload_secret "$PROJECT_ID" "$SECRET_NAME" "$TEMP_KEY"
-
-rm -f 
+exit 0
