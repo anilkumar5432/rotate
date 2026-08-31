@@ -13,8 +13,8 @@ steps:
           exit 1
         fi
 
-        apt-get update
-        apt-get install -y jq
+        #apt-get update
+        #apt-get install -y jq
 
         chmod +x scripts/rotate-sa-key.sh
 
