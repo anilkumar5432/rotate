@@ -14,7 +14,7 @@ steps:
         fi
 
         #apt-get update
-        #apt-get install -y jq
+        apt-get install -y jq
         jq --version
 
         chmod +x scripts/rotate-sa-key.sh
