@@ -81,7 +81,7 @@ create_new_key() {
   local SA_EMAIL="$2"
   local SECRET_NAME="$3"
 
-  TEMP_KEY="/tmp/${SECRET_NAME}.json"
+  local TEMP_KEY="/tmp/${SECRET_NAME}.json"
 
   log "Creating new service account key"
 
@@ -116,6 +116,7 @@ delete_expired_keys() {
   local SA_EMAIL="$2"
 
   local DELETED_COUNT=0
+  local CURRENT_EPOCH
 
   CURRENT_EPOCH=$(date -u +%s)
 
@@ -147,7 +148,6 @@ delete_expired_keys() {
       DELETED_COUNT=$((DELETED_COUNT + 1))
 
       log "Deleted expired key: $KEY_ID"
-
     fi
 
   done < <(echo "$KEYS" | jq -c '.[]')
@@ -156,10 +156,31 @@ delete_expired_keys() {
 }
 
 # ============================================================================
+# Conditional Cleanup
+# ============================================================================
+
+delete_keys_if_enabled() {
+
+  local PROJECT_ID="$1"
+  local SA_EMAIL="$2"
+
+  if [[ "${DELETE_EXPIRED_KEYS,,}" == "true" ]]; then
+    log "Expired key cleanup enabled"
+
+    delete_expired_keys \
+      "$PROJECT_ID" \
+      "$SA_EMAIL"
+  else
+    warn "Expired key cleanup skipped by trigger parameter (_DELETE_EXPIRED_KEYS=false)"
+  fi
+}
+
+# ============================================================================
 # Validate Input
 # ============================================================================
 
 SA_EMAIL="${1:-}"
+DELETE_EXPIRED_KEYS="${2:-true}"
 
 [[ -z "$SA_EMAIL" ]] && error "Service Account email is required"
 
@@ -175,10 +196,11 @@ SECRET_NAME=$(echo "$SA_EMAIL" | cut -d'@' -f1)
 
 log "=================================================="
 log "Starting Service Account Key Rotation"
-log "Service Account : $SA_EMAIL"
-log "Project ID      : $PROJECT_ID"
-log "Secret Name     : $SECRET_NAME"
-log "Threshold Days  : $ROTATE_THRESHOLD_DAYS"
+log "Service Account      : $SA_EMAIL"
+log "Project ID           : $PROJECT_ID"
+log "Secret Name          : $SECRET_NAME"
+log "Threshold Days       : $ROTATE_THRESHOLD_DAYS"
+log "Delete Expired Keys  : $DELETE_EXPIRED_KEYS"
 log "=================================================="
 
 # ============================================================================
@@ -208,7 +230,7 @@ if [[ "$KEY_COUNT" -eq 0 ]]; then
     "$SA_EMAIL" \
     "$SECRET_NAME"
 
-  delete_expired_keys \
+  delete_keys_if_enabled \
     "$PROJECT_ID" \
     "$SA_EMAIL"
 
@@ -243,7 +265,7 @@ if [[ "$DAYS_LEFT" -gt "$ROTATE_THRESHOLD_DAYS" ]]; then
 
   log "Key is healthy. No rotation required."
 
-  delete_expired_keys \
+  delete_keys_if_enabled \
     "$PROJECT_ID" \
     "$SA_EMAIL"
 
@@ -260,14 +282,4 @@ warn "Key expires within ${ROTATE_THRESHOLD_DAYS} days"
 warn "Creating replacement key"
 
 create_new_key \
-  "$PROJECT_ID" \
-  "$SA_EMAIL" \
-  "$SECRET_NAME"
-
-delete_expired_keys \
-  "$PROJECT_ID" \
-  "$SA_EMAIL"
-
-log "Service account key rotation completed successfully"
-
-exit 0
+  "$PROJECT
