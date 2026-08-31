@@ -174,7 +174,7 @@ PROJECT_ID=$(echo "$SA_EMAIL" | cut -d'@' -f2 | cut -d'.' -f1)
 SECRET_NAME=$(echo "$SA_EMAIL" | cut -d'@' -f1)
 
 log "=================================================="
-log "Starting Service Account Key Automation"
+log "Starting Service Account Key Rotation"
 log "Service Account : $SA_EMAIL"
 log "Project ID      : $PROJECT_ID"
 log "Secret Name     : $SECRET_NAME"
