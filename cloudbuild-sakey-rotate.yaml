@@ -1,0 +1,25 @@
+steps:
+  - id: SA Key Automation ForgedFiber37
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -e
+
+        if [[ -z "${_SA_EMAIL}" ]]; then
+          echo "ERROR: _SA_EMAIL substitution is mandatory."
+          exit 1
+        fi
+
+        apt-get update
+        apt-get install -y jq
+
+        chmod +x scripts/rotate-sa-key.sh
+
+        echo "SA Email: ${_SA_EMAIL}"
+
+        ./scripts/rotate-sa-key.sh "${_SA_EMAIL}"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
