@@ -35,13 +35,13 @@ ensure_secret() {
   local SECRET_NAME="$2"
 
   if gcloud secrets describe "$SECRET_NAME" \
-    --project="$PROJECT_ID" >/dev/null 2>&1; then
+      --project="$PROJECT_ID" >/dev/null 2>&1; then
 
     log "Secret already exists: $SECRET_NAME"
 
   else
 
-    warn "Secret not found. Creating: $SECRET_NAME"
+    warn "Creating secret: $SECRET_NAME"
 
     gcloud secrets create \
       "$SECRET_NAME" \
@@ -68,7 +68,7 @@ upload_secret() {
     --project="$PROJECT_ID" \
     --format="value(name)")
 
-  log "Created secret version: $VERSION_NAME"
+  log "Secret version created: $VERSION_NAME"
 }
 
 # ============================================================================
@@ -92,7 +92,7 @@ create_new_key() {
 
   NEW_KEY_ID=$(jq -r '.private_key_id' "$TEMP_KEY")
 
-  log "Created new key: $NEW_KEY_ID"
+  log "New key created: $NEW_KEY_ID"
 
   ensure_secret "$PROJECT_ID" "$SECRET_NAME"
 
@@ -107,52 +107,58 @@ create_new_key() {
 }
 
 # ============================================================================
-# Delete Expired Keys
+# Delete Specific Expired Key
 # ============================================================================
 
-delete_expired_keys() {
+delete_expired_key() {
 
   local PROJECT_ID="$1"
   local SA_EMAIL="$2"
+  local TARGET_KEY_ID="$3"
 
-  local DELETED_COUNT=0
-  local CURRENT_EPOCH
+  [[ -z "$TARGET_KEY_ID" ]] && \
+    error "_KEY_ID is mandatory when deletion is enabled"
+
+  log "Validating key: $TARGET_KEY_ID"
 
   CURRENT_EPOCH=$(date -u +%s)
 
-  KEYS=$(gcloud iam service-accounts keys list \
+  KEY_INFO=$(gcloud iam service-accounts keys list \
     --iam-account="$SA_EMAIL" \
     --project="$PROJECT_ID" \
     --filter="keyType=USER_MANAGED" \
-    --format=json 2>/dev/null || echo "[]")
+    --format=json)
 
-  while read -r KEY; do
+  MATCHING_KEY=$(echo "$KEY_INFO" | jq -c \
+      --arg KEY_ID "$TARGET_KEY_ID" \
+      '.[] | select(.name | endswith($KEY_ID))')
 
-    KEY_ID=$(echo "$KEY" | jq -r '.name | split("/") | last')
-    EXPIRY=$(echo "$KEY" | jq -r '.validBeforeTime')
+  [[ -z "$MATCHING_KEY" ]] && \
+      error "Key not found: $TARGET_KEY_ID"
 
-    [[ "$EXPIRY" == "null" || -z "$EXPIRY" ]] && continue
+  EXPIRY=$(echo "$MATCHING_KEY" | jq -r '.validBeforeTime')
 
-    EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
+  [[ "$EXPIRY" == "null" ]] && \
+      error "Unable to determine expiry date"
 
-    if [[ "$EXPIRY_EPOCH" -le "$CURRENT_EPOCH" ]]; then
+  EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
 
-      warn "Deleting expired key: $KEY_ID"
+  if [[ "$EXPIRY_EPOCH" -gt "$CURRENT_EPOCH" ]]; then
+    warn "Key is not expired"
+    warn "Key ID : $TARGET_KEY_ID"
+    warn "Expiry : $EXPIRY"
+    return 0
+  fi
 
-      gcloud iam service-accounts keys delete \
-        "$KEY_ID" \
-        --iam-account="$SA_EMAIL" \
-        --project="$PROJECT_ID" \
-        --quiet
+  warn "Deleting expired key: $TARGET_KEY_ID"
 
-      DELETED_COUNT=$((DELETED_COUNT + 1))
+  gcloud iam service-accounts keys delete \
+    "$TARGET_KEY_ID" \
+    --iam-account="$SA_EMAIL" \
+    --project="$PROJECT_ID" \
+    --quiet
 
-      log "Deleted expired key: $KEY_ID"
-    fi
-
-  done < <(echo "$KEYS" | jq -c '.[]')
-
-  log "Expired keys deleted: $DELETED_COUNT"
+  log "Key deleted successfully"
 }
 
 # ============================================================================
@@ -163,37 +169,42 @@ delete_keys_if_enabled() {
 
   local PROJECT_ID="$1"
   local SA_EMAIL="$2"
+  local TARGET_KEY_ID="$3"
 
   if [[ "${DELETE_EXPIRED_KEYS,,}" == "true" ]]; then
 
-    log "Expired key cleanup enabled"
+    log "Deletion enabled"
 
-    delete_expired_keys \
+    delete_expired_key \
       "$PROJECT_ID" \
-      "$SA_EMAIL"
+      "$SA_EMAIL" \
+      "$TARGET_KEY_ID"
 
   else
 
-    warn "Expired key cleanup skipped by trigger parameter (_DELETE_EXPIRED_KEYS=false)"
+    warn "Deletion skipped"
   fi
 }
 
 # ============================================================================
-# Validate Input
+# Input
 # ============================================================================
 
 SA_EMAIL="${1:-}"
-DELETE_EXPIRED_KEYS="${2:-true}"
+DELETE_EXPIRED_KEYS="${2:-false}"
+TARGET_KEY_ID="${3:-}"
 
-[[ -z "$SA_EMAIL" ]] && error "Service Account email is required"
+[[ -z "$SA_EMAIL" ]] && \
+  error "Service Account email is required"
 
 # ============================================================================
-# Derive Project Details
+# Project Details
 # ============================================================================
 
 PROJECT_ID=$(echo "$SA_EMAIL" | cut -d'@' -f2 | cut -d'.' -f1)
 
-[[ -z "$PROJECT_ID" ]] && error "Unable to derive Project ID"
+[[ -z "$PROJECT_ID" ]] && \
+  error "Could not derive Project ID"
 
 SECRET_NAME=$(echo "$SA_EMAIL" | cut -d'@' -f1)
 
@@ -203,11 +214,12 @@ log "Service Account      : $SA_EMAIL"
 log "Project ID           : $PROJECT_ID"
 log "Secret Name          : $SECRET_NAME"
 log "Threshold Days       : $ROTATE_THRESHOLD_DAYS"
-log "Delete Expired Keys  : $DELETE_EXPIRED_KEYS"
+log "Delete Key           : $DELETE_EXPIRED_KEYS"
+log "Target Key ID        : ${TARGET_KEY_ID:-N/A}"
 log "=================================================="
 
 # ============================================================================
-# Get Existing User Managed Keys
+# Existing Keys
 # ============================================================================
 
 KEY_INFO=$(gcloud iam service-accounts keys list \
@@ -218,10 +230,10 @@ KEY_INFO=$(gcloud iam service-accounts keys list \
 
 KEY_COUNT=$(echo "$KEY_INFO" | jq length)
 
-log "User-managed keys found: $KEY_COUNT"
+log "User managed keys found: $KEY_COUNT"
 
 # ============================================================================
-# No Keys Exist
+# No Keys
 # ============================================================================
 
 if [[ "$KEY_COUNT" -eq 0 ]]; then
@@ -233,20 +245,18 @@ if [[ "$KEY_COUNT" -eq 0 ]]; then
     "$SA_EMAIL" \
     "$SECRET_NAME"
 
-  delete_keys_if_enabled \
-    "$PROJECT_ID" \
-    "$SA_EMAIL"
-
-  log "Initial key created successfully"
   exit 0
 fi
 
 # ============================================================================
-# Find Latest Key
+# Newest Key
 # ============================================================================
 
-NEWEST_KEY_ID=$(echo "$KEY_INFO" | jq -r 'sort_by(.validAfterTime) | last | .name')
-NEWEST_EXPIRY=$(echo "$KEY_INFO" | jq -r 'sort_by(.validAfterTime) | last | .validBeforeTime')
+NEWEST_KEY_ID=$(echo "$KEY_INFO" | jq -r \
+  'sort_by(.validAfterTime) | last | .name')
+
+NEWEST_EXPIRY=$(echo "$KEY_INFO" | jq -r \
+  'sort_by(.validAfterTime) | last | .validBeforeTime')
 
 log "Newest Key ID : $(basename "$NEWEST_KEY_ID")"
 log "Expiry Date   : $NEWEST_EXPIRY"
@@ -256,29 +266,29 @@ CURRENT_EPOCH=$(date -u +%s)
 
 DAYS_LEFT=$(((EXPIRY_EPOCH - CURRENT_EPOCH) / 86400))
 
-log "Remaining Days : $DAYS_LEFT"
+log "Days Remaining : $DAYS_LEFT"
 
 # ============================================================================
-# Key Healthy
+# Healthy
 # ============================================================================
 
 if [[ "$DAYS_LEFT" -gt "$ROTATE_THRESHOLD_DAYS" ]]; then
 
-  log "Key is healthy. No rotation required."
+  log "Key is healthy"
 
   delete_keys_if_enabled \
-    "$PROJECT_ID" \
-    "$SA_EMAIL"
+      "$PROJECT_ID" \
+      "$SA_EMAIL" \
+      "$TARGET_KEY_ID"
 
-  log "Validation completed successfully"
   exit 0
 fi
 
 # ============================================================================
-# Rotate Key
+# Rotate
 # ============================================================================
 
-warn "Key expires within ${ROTATE_THRESHOLD_DAYS} days"
+warn "Key nearing expiry"
 warn "Creating replacement key"
 
 create_new_key \
@@ -288,7 +298,8 @@ create_new_key \
 
 delete_keys_if_enabled \
   "$PROJECT_ID" \
-  "$SA_EMAIL"
+  "$SA_EMAIL" \
+  "$TARGET_KEY_ID"
 
 log "Key rotation completed successfully"
 
