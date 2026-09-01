@@ -165,12 +165,15 @@ delete_keys_if_enabled() {
   local SA_EMAIL="$2"
 
   if [[ "${DELETE_EXPIRED_KEYS,,}" == "true" ]]; then
+
     log "Expired key cleanup enabled"
 
     delete_expired_keys \
       "$PROJECT_ID" \
       "$SA_EMAIL"
+
   else
+
     warn "Expired key cleanup skipped by trigger parameter (_DELETE_EXPIRED_KEYS=false)"
   fi
 }
@@ -235,7 +238,6 @@ if [[ "$KEY_COUNT" -eq 0 ]]; then
     "$SA_EMAIL"
 
   log "Initial key created successfully"
-
   exit 0
 fi
 
@@ -243,9 +245,8 @@ fi
 # Find Latest Key
 # ============================================================================
 
-NEWEST_KEY_ID=$(echo "$KEY_INFO" | jq -r 'sort_by(.validBeforeTime) | last | .name')
-
-NEWEST_EXPIRY=$(echo "$KEY_INFO" | jq -r 'sort_by(.validBeforeTime) | last | .validBeforeTime')
+NEWEST_KEY_ID=$(echo "$KEY_INFO" | jq -r 'sort_by(.validAfterTime) | last | .name')
+NEWEST_EXPIRY=$(echo "$KEY_INFO" | jq -r 'sort_by(.validAfterTime) | last | .validBeforeTime')
 
 log "Newest Key ID : $(basename "$NEWEST_KEY_ID")"
 log "Expiry Date   : $NEWEST_EXPIRY"
@@ -270,7 +271,6 @@ if [[ "$DAYS_LEFT" -gt "$ROTATE_THRESHOLD_DAYS" ]]; then
     "$SA_EMAIL"
 
   log "Validation completed successfully"
-
   exit 0
 fi
 
@@ -282,4 +282,14 @@ warn "Key expires within ${ROTATE_THRESHOLD_DAYS} days"
 warn "Creating replacement key"
 
 create_new_key \
-  "$PROJECT
+  "$PROJECT_ID" \
+  "$SA_EMAIL" \
+  "$SECRET_NAME"
+
+delete_keys_if_enabled \
+  "$PROJECT_ID" \
+  "$SA_EMAIL"
+
+log "Key rotation completed successfully"
+
+exit 0
