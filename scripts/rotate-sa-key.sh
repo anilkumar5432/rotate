@@ -229,14 +229,14 @@ if [[ "${DELETE_EXPIRED_KEYS,,}" == "true" ]]; then
   [[ -z "$TARGET_KEY_ID" ]] && \
     error "_KEY_ID must be provided when _DELETE_EXPIRED_KEYS=true"
 
-  log "Delete-only mode enabled"
+  log "Delete expired key mode enabled"
 
   delete_expired_key \
     "$PROJECT_ID" \
     "$SA_EMAIL" \
     "$TARGET_KEY_ID"
 
-  log "Delete-only operation completed"
+  log "Delete expired key operation completed successfully."
 
   exit 0
 fi
