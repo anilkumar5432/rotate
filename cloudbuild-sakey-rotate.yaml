@@ -9,6 +9,13 @@ steps:
 
         if [[ -z "${_SA_EMAIL}" ]]; then
           echo "ERROR: _SA_EMAIL substitution is mandatory."
+          echo "Please provide a Service Account email while running the trigger."
+          exit 1
+        fi
+
+        if [[ "${_DELETE_EXPIRED_KEYS,,}" == "true" && -z "${_KEY_ID}" ]]; then
+          echo "ERROR: _KEY_ID substitution is mandatory when _DELETE_EXPIRED_KEYS=true."
+          echo "Please provide the expired Service Account Key ID."
           exit 1
         fi
 
