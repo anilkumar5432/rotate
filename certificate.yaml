@@ -1,0 +1,30 @@
+steps:
+  - id: Certificate Automation
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -e
+
+        apt-get update
+        apt-get install -y openssl jq
+
+        chmod +x scripts/certificate_automation.sh
+
+        ./scripts/certificate_automation.sh \
+          "${_APP_NAME}" \
+          "${_ENVIRONMENT}" \
+          "${_TARGET_PROJECT_ID}" \
+          "${_VALIDITY_DAYS}" \
+          "${_DNS_PREFIXES}"
+
+substitutions:
+  _APP_NAME: ""
+  _ENVIRONMENT: "dev"
+  _TARGET_PROJECT_ID: ""
+  _DNS_PREFIXES: ""
+  _VALIDITY_DAYS: "730"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
