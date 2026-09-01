@@ -7,8 +7,6 @@ steps:
       - |
         set -e
 
-        export DEBIAN_FRONTEND=noninteractive
-
         if [[ -z "${_SA_EMAIL}" ]]; then
           echo "ERROR: _SA_EMAIL substitution is mandatory."
           exit 1
