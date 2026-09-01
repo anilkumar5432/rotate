@@ -3,6 +3,10 @@
 set -Eeuo pipefail
 umask 077
 
+# ==============================================================================
+# Logging
+# ==============================================================================
+
 log() {
   echo "[INFO] $(date -u +"%Y-%m-%dT%H:%M:%SZ") - $*"
 }
@@ -17,7 +21,7 @@ error() {
 }
 
 # ==============================================================================
-# CONFIG
+# Static Configuration
 # ==============================================================================
 
 CA_PROJECT_ID="project-c8d07e0f-e592-42aa-a3d"
@@ -26,7 +30,7 @@ LOCATION="us-central1"
 CA_POOL="ff37-intranet-pool-sub"
 
 # ==============================================================================
-# INPUTS
+# Inputs
 # ==============================================================================
 
 APP_NAME="${1:-}"
@@ -35,13 +39,16 @@ TARGET_PROJECT_ID="${3:-}"
 VALIDITY_DAYS="${4:-730}"
 DNS_PREFIX_INPUT="${5:-}"
 
-[[ -z "${APP_NAME}" ]] && error "APP_NAME is required"
-[[ -z "${ENVIRONMENT}" ]] && error "ENVIRONMENT is required"
-[[ -z "${TARGET_PROJECT_ID}" ]] && error "TARGET_PROJECT_ID is required"
-[[ -z "${DNS_PREFIX_INPUT}" ]] && error "DNS_PREFIXES is required"
+[[ -z "$APP_NAME" ]] && error "APP_NAME is required"
+[[ -z "$ENVIRONMENT" ]] && error "ENVIRONMENT is required"
+[[ -z "$TARGET_PROJECT_ID" ]] && error "TARGET_PROJECT_ID is required"
+[[ -z "$DNS_PREFIX_INPUT" ]] && error "DNS_PREFIXES are required"
+
+[[ "$ENVIRONMENT" =~ ^(qa|dev|prod)$ ]] || \
+  error "ENVIRONMENT must be qa, dev or prod"
 
 # ==============================================================================
-# DERIVED VALUES
+# Derived Values
 # ==============================================================================
 
 DNS_SUFFIX="${ENVIRONMENT}.ff37.intranet"
@@ -66,10 +73,10 @@ FINAL_CERT_FILE="${OUTPUT_DIR}/${APP_NAME}_${ENVIRONMENT}_cert.pem"
 CERTIFICATE_ID="${CERT_NAME}-${TIMESTAMP}"
 
 # ==============================================================================
-# BUILD SAN
+# Build SAN List
 # ==============================================================================
 
-IFS=',' read -ra RAW_DNS_PREFIXES <<< "$DNS_PREFIX_INPUT"
+IFS=',' read -ra RAW_DNS_PREFIXES <<< "${DNS_PREFIX_INPUT}"
 
 SAN_VALUE=""
 
@@ -77,28 +84,37 @@ for PREFIX in "${RAW_DNS_PREFIXES[@]}"
 do
   PREFIX="$(echo "${PREFIX}" | xargs)"
 
+  [[ -z "${PREFIX}" ]] && error "Empty DNS prefix detected"
+
+  DNS_NAME="${PREFIX}.${DNS_SUFFIX}"
+
   [[ -n "${SAN_VALUE}" ]] && SAN_VALUE="${SAN_VALUE},"
 
-  SAN_VALUE="${SAN_VALUE}DNS:${PREFIX}.${DNS_SUFFIX}"
+  SAN_VALUE="${SAN_VALUE}DNS:${DNS_NAME}"
 done
 
 # ==============================================================================
-# START
+# Summary
 # ==============================================================================
 
 log "======================================================="
 log "Starting Certificate Automation"
 log "Application      : ${APP_NAME}"
 log "Environment      : ${ENVIRONMENT}"
-log "Project          : ${TARGET_PROJECT_ID}"
+log "Target Project   : ${TARGET_PROJECT_ID}"
 log "Certificate Name : ${CERT_NAME}"
+log "Validity         : ${VALIDITY_DAYS} days"
+log "Common Name      : ${COMMON_NAME}"
+log "CA Project       : ${CA_PROJECT_ID}"
+log "CA Pool          : ${CA_POOL}"
+log "Location         : ${LOCATION}"
 log "======================================================="
 
 # ==============================================================================
-# KEY
+# Generate Private Key
 # ==============================================================================
 
-log "Generating EC key"
+log "Generating EC private key"
 
 openssl ecparam \
   -genkey \
@@ -109,7 +125,7 @@ openssl ecparam \
 chmod 600 "${KEY_FILE}"
 
 # ==============================================================================
-# CSR
+# Generate CSR
 # ==============================================================================
 
 log "Generating CSR"
@@ -127,15 +143,21 @@ openssl req \
   -noout \
   -verify
 
-log "CSR generated"
+log "CSR generated successfully"
 
 # ==============================================================================
-# CREATE CERTIFICATE
+# Convert Validity
 # ==============================================================================
 
-VALIDITY_SECONDS=$((VALIDITY_DAYS * 86400))
+VALIDITY_SECONDS=$(( VALIDITY_DAYS * 86400 ))
 
-log "Creating CAS certificate"
+log "Validity Seconds: ${VALIDITY_SECONDS}"
+
+# ==============================================================================
+# Create CAS Certificate
+# ==============================================================================
+
+log "Requesting certificate from CAS"
 
 gcloud privateca certificates create "${CERTIFICATE_ID}" \
   --project="${CA_PROJECT_ID}" \
@@ -146,10 +168,10 @@ gcloud privateca certificates create "${CERTIFICATE_ID}" \
   --cert-output-file="${CERT_FILE}"
 
 # ==============================================================================
-# CHAIN
+# Retrieve Chain
 # ==============================================================================
 
-log "Retrieving chain"
+log "Retrieving certificate chain"
 
 CERT_RESOURCE="projects/${CA_PROJECT_NUMBER}/locations/${LOCATION}/caPools/${CA_POOL}/certificates/${CERTIFICATE_ID}"
 
@@ -159,7 +181,7 @@ gcloud privateca certificates describe "${CERT_RESOURCE}" \
   > "${CHAIN_FILE}"
 
 # ==============================================================================
-# BUILD FINAL PEM
+# Build Final PEM Bundle
 # ==============================================================================
 
 log "Building PEM bundle"
@@ -171,111 +193,53 @@ printf '\n' >> "${FINAL_CERT_FILE}"
 cat "${CHAIN_FILE}" >> "${FINAL_CERT_FILE}"
 
 # ==============================================================================
-# DEBUG
+# Validate Key / Certificate Match
 # ==============================================================================
 
-log "Certificate Debug"
-
-echo "--------------------------------"
-echo "LEAF CERT COUNT"
-grep -c "BEGIN CERTIFICATE" "${CERT_FILE}" || true
-
-echo "CHAIN CERT COUNT"
-grep -c "BEGIN CERTIFICATE" "${CHAIN_FILE}" || true
-
-echo "FINAL CERT COUNT"
-grep -c "BEGIN CERTIFICATE" "${FINAL_CERT_FILE}" || true
-
-echo "--------------------------------"
-echo "LEAF SUBJECT / ISSUER"
-
-openssl x509 \
-  -in "${CERT_FILE}" \
-  -subject \
-  -issuer \
-  -noout
-
-echo "--------------------------------"
-echo "SAN VALUES"
-
-openssl x509 \
-  -in "${CERT_FILE}" \
-  -text \
-  -noout | grep -A2 "Subject Alternative Name"
-
-echo "--------------------------------"
-echo "PEM VALIDATION"
-
-openssl crl2pkcs7 \
-  -nocrl \
-  -certfile "${FINAL_CERT_FILE}" |
-openssl pkcs7 \
-  -print_certs \
-  -noout
-
-echo "--------------------------------"
-
-# ==============================================================================
-# KEY MATCH CHECK
-# ==============================================================================
+log "Validating certificate"
 
 KEY_PUBLIC_SHA="$(
 openssl pkey \
--in "${KEY_FILE}" \
--pubout \
--outform DER |
+  -in "${KEY_FILE}" \
+  -pubout \
+  -outform DER |
 openssl dgst -sha256 |
 awk '{print $NF}'
 )"
 
 CERT_PUBLIC_SHA="$(
 openssl x509 \
--in "${CERT_FILE}" \
--pubkey \
--noout |
+  -in "${CERT_FILE}" \
+  -pubkey \
+  -noout |
 openssl pkey \
--pubin \
--outform DER |
+  -pubin \
+  -outform DER |
 openssl dgst -sha256 |
 awk '{print $NF}'
 )"
 
 [[ "${KEY_PUBLIC_SHA}" == "${CERT_PUBLIC_SHA}" ]] || \
-error "Key and certificate do not match"
+  error "Certificate does not match private key"
 
-log "Key matches certificate"
+log "Certificate validation successful"
 
 # ==============================================================================
-# EXISTENCE CHECK
+# Verify SSL Certificate Does Not Already Exist
 # ==============================================================================
 
 if gcloud compute ssl-certificates describe "${CERT_NAME}" \
   --project="${TARGET_PROJECT_ID}" \
   --region="${LOCATION}" >/dev/null 2>&1
 then
-  error "Certificate already exists"
+  error "SSL certificate already exists: ${CERT_NAME}"
 fi
 
 # ==============================================================================
-# TEST IMPORT LEAF CERT ONLY
+# Create Regional Compute SSL Certificate
 # ==============================================================================
 
-log "Testing import with LEAF CERTIFICATE only"
-
-gcloud compute ssl-certificates create "${CERT_NAME}-leaf-test" \
-  --project="${TARGET_PROJECT_ID}" \
-  --region="${LOCATION}" \
-  --certificate="${CERT_FILE}" \
-  --private-key="${KEY_FILE}" \
-  --quiet
-
-log "LEAF CERTIFICATE IMPORT SUCCEEDED"
-
-# ==============================================================================
-# FULL CHAIN IMPORT
-# ==============================================================================
-
-log "Creating final SSL certificate"
+log "Creating regional Compute SSL certificate"
 
 gcloud compute ssl-certificates create "${CERT_NAME}" \
   --project="${TARGET_PROJECT_ID}" \
@@ -284,7 +248,16 @@ gcloud compute ssl-certificates create "${CERT_NAME}" \
   --private-key="${KEY_FILE}" \
   --quiet
 
-log "SUCCESS"
+# ==============================================================================
+# Complete
+# ==============================================================================
 
+log "======================================================="
+log "Certificate Created Successfully"
 log "Certificate Name : ${CERT_NAME}"
-log "PEM File         : ${FINAL_CERT_FILE}"
+log "Target Project   : ${TARGET_PROJECT_ID}"
+log "Region           : ${LOCATION}"
+log "Private Key      : ${KEY_FILE}"
+log "CSR              : ${CSR_FILE}"
+log "Certificate PEM  : ${FINAL_CERT_FILE}"
+log "======================================================="
