@@ -24,7 +24,8 @@ error() {
 # Static Configuration
 # ==============================================================================
 
-CA_PROJECT_ID="prj-ff-cert-mgr-prod-001-2147"
+#CA_PROJECT_ID="prj-ff-cert-mgr-prod-001-2147"
+CA_PROJECT_ID="project-c8d07e0f-e592-42aa-a3d"
 LOCATION="us-central1"
 CA_POOL="ff37-intranet-pool-sub"
 
