@@ -171,10 +171,11 @@ log "Requesting certificate from CAS"
 
 gcloud privateca certificates create "$CERTIFICATE_ID" \
   --project="$CA_PROJECT_ID" \
-  --location="$LOCATION" \
   --issuer-pool="$CA_POOL" \
+  --issuer-location="$LOCATION" \
   --csr="$CSR_FILE" \
-  --validity="${VALIDITY_SECONDS}s"
+  --validity="${VALIDITY_SECONDS}s" \
+  --cert-output-file="$CERT_FILE"
 
 # ==============================================================================
 # Export Certificate
