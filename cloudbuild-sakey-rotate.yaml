@@ -7,9 +7,10 @@ steps:
       - |
         set -e
 
+        export DEBIAN_FRONTEND=noninteractive
+
         if [[ -z "${_SA_EMAIL}" ]]; then
           echo "ERROR: _SA_EMAIL substitution is mandatory."
-          echo "Please provide a Service Account email while running the trigger."
           exit 1
         fi
 
@@ -18,16 +19,19 @@ steps:
 
         chmod +x scripts/rotate-sa-key.sh
 
-        echo "Service Account       : ${_SA_EMAIL}"
-        echo "Delete Expired Keys   : ${_DELETE_EXPIRED_KEYS}"
+        echo "Service Account : ${_SA_EMAIL}"
+        echo "Delete Keys     : ${_DELETE_EXPIRED_KEYS}"
+        echo "Key ID          : ${_KEY_ID}"
 
         ./scripts/rotate-sa-key.sh \
           "${_SA_EMAIL}" \
-          "${_DELETE_EXPIRED_KEYS}"
+          "${_DELETE_EXPIRED_KEYS}" \
+          "${_KEY_ID}"
 
 substitutions:
   _SA_EMAIL: ""
   _DELETE_EXPIRED_KEYS: "false"
+  _KEY_ID: ""
 
 options:
   logging: CLOUD_LOGGING_ONLY
